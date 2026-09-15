@@ -1,0 +1,26 @@
+[
+  {
+    "name": "Exchange_A",
+    "type": "CEX",
+    "chain": "EVM",
+    "addresses": [
+      "0x1111111111111111111111111111111111111111"
+    ]
+  },
+  {
+    "name": "Exchange_B",
+    "type": "CEX",
+    "chain": "EVM",
+    "addresses": [
+      "0x2222222222222222222222222222222222222222"
+    ]
+  },
+  {
+    "name": "Exchange_C",
+    "type": "CEX",
+    "chain": "EVM",
+    "addresses": [
+      "0x3333333333333333333333333333333333333333"
+    ]
+  }
+]
