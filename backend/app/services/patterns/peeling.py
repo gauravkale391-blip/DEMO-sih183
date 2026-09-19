@@ -1,17 +1,32 @@
-def detect_peeling(transactions, min_chain_length=3, tolerance=0.15):
+from collections import defaultdict
+
+
+def detect_peeling(
+    transactions,
+    root_wallet=None,
+    min_chain_length=3,
+    min_ratio=0.50,
+    max_ratio=0.98,
+    max_findings=25
+):
     """
-    Detect peeling-chain behavior.
+    Detect possible peeling-chain behavior.
 
     Example:
-    A -> B (100)
-    B -> C (85)
-    C -> D (70)
-    D -> E (55)
+        A -> B 100
+        B -> C 90
+        C -> D 80
 
-    Each hop continues with a reduced amount.
+    The continuing amount should gradually
+    decrease and transactions should move
+    forward in time.
+
+    This is a heuristic indicator only.
     """
 
-    graph = {}
+    graph = defaultdict(list)
+
+    seen_transactions = set()
 
     for tx in transactions:
         sender = tx.get("from")
@@ -21,38 +36,131 @@ def detect_peeling(transactions, min_chain_length=3, tolerance=0.15):
         if not sender or not receiver:
             continue
 
+        sender = sender.lower()
+        receiver = receiver.lower()
+
+        if sender == receiver:
+            continue
+
         try:
             value = float(value)
         except (TypeError, ValueError):
             continue
 
-        sender = sender.lower()
-        receiver = receiver.lower()
+        if value <= 0:
+            continue
 
-        graph.setdefault(sender, []).append({
+        try:
+            timestamp = int(
+                tx.get("timeStamp", 0)
+                or 0
+            )
+        except (TypeError, ValueError):
+            timestamp = 0
+
+        tx_hash = (
+            tx.get("hash")
+            or tx.get("transactionHash")
+        )
+
+        key = (
+            str(tx_hash).lower()
+            if tx_hash
+            else (
+                sender,
+                receiver,
+                value,
+                timestamp
+            )
+        )
+
+        if key in seen_transactions:
+            continue
+
+        seen_transactions.add(key)
+
+        graph[sender].append({
             "to": receiver,
-            "value": value
+            "value": value,
+            "timestamp": timestamp
         })
 
+    for wallet in graph:
+        graph[wallet].sort(
+            key=lambda item:
+                item["timestamp"]
+        )
+
     findings = []
+    seen_paths = set()
 
-    def dfs(wallet, path, values, visited):
+    if root_wallet:
+        root = root_wallet.lower()
 
-        if len(path) - 1 >= min_chain_length:
-            findings.append({
-                "pattern": "PEELING_CHAIN",
-                "start_wallet": path[0],
-                "hops": len(path) - 1,
-                "path": path.copy(),
-                "values": values.copy()
-            })
+        start_wallets = (
+            [root]
+            if root in graph
+            else []
+        )
+    else:
+        start_wallets = list(graph.keys())
 
-        for tx in graph.get(wallet, []):
+    def dfs(
+        wallet,
+        path,
+        values,
+        last_timestamp,
+        visited
+    ):
+        if len(findings) >= max_findings:
+            return
 
-            next_wallet = tx["to"]
-            next_value = tx["value"]
+        hops = len(path) - 1
+
+        if hops >= min_chain_length:
+            path_key = tuple(path)
+
+            if path_key not in seen_paths:
+                seen_paths.add(path_key)
+
+                findings.append({
+                    "pattern":
+                        "PEELING_CHAIN",
+                    "start_wallet":
+                        path[0],
+                    "wallet":
+                        path[0],
+                    "hops":
+                        hops,
+                    "path":
+                        path.copy(),
+                    "values":
+                        values.copy()
+                })
+
+            # Stop here so longer extensions
+            # are not repeatedly counted.
+            return
+
+        for edge in graph.get(
+            wallet,
+            []
+        ):
+            next_wallet = edge["to"]
+            next_value = edge["value"]
+            next_timestamp = edge[
+                "timestamp"
+            ]
 
             if next_wallet in visited:
+                continue
+
+            if (
+                last_timestamp
+                and next_timestamp
+                and next_timestamp
+                < last_timestamp
+            ):
                 continue
 
             if values:
@@ -61,27 +169,49 @@ def detect_peeling(transactions, min_chain_length=3, tolerance=0.15):
                 if previous_value <= 0:
                     continue
 
-                # Amount should decrease
-                ratio = next_value / previous_value
+                ratio = (
+                    next_value
+                    / previous_value
+                )
 
-                if ratio >= 1:
+                if ratio < min_ratio:
                     continue
 
-                # Avoid extremely large drops
-                if ratio < tolerance:
+                if ratio > max_ratio:
                     continue
 
             visited.add(next_wallet)
+
             path.append(next_wallet)
             values.append(next_value)
 
-            dfs(next_wallet, path, values, visited)
+            dfs(
+                next_wallet,
+                path,
+                values,
+                next_timestamp
+                or last_timestamp,
+                visited
+            )
 
             values.pop()
             path.pop()
+
             visited.remove(next_wallet)
 
-    for wallet in graph:
-        dfs(wallet, [wallet], [], {wallet})
+            if len(findings) >= max_findings:
+                return
+
+    for start_wallet in start_wallets:
+        dfs(
+            start_wallet,
+            [start_wallet],
+            [],
+            None,
+            {start_wallet}
+        )
+
+        if len(findings) >= max_findings:
+            break
 
     return findings

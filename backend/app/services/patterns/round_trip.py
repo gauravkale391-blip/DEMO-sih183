@@ -1,14 +1,24 @@
-def detect_round_trip(transactions, min_hops=2):
+from collections import defaultdict
+
+
+def detect_round_trip(
+    transactions,
+    root_wallet=None,
+    min_hops=3,
+    max_hops=6,
+    max_findings=25
+):
     """
-    Detect round-trip fund movement.
+    Detect unique directed round-trip fund movement.
 
     Example:
-    A -> B -> C -> A
+        A -> B -> C -> A
 
-    The funds eventually return to the starting wallet.
+    Detection is root-centric when root_wallet
+    is provided.
     """
 
-    graph = {}
+    graph = defaultdict(set)
 
     for tx in transactions:
         sender = tx.get("from")
@@ -20,46 +30,127 @@ def detect_round_trip(transactions, min_hops=2):
         sender = sender.lower()
         receiver = receiver.lower()
 
-        graph.setdefault(sender, []).append(receiver)
+        if sender == receiver:
+            continue
+
+        graph[sender].add(receiver)
 
     findings = []
+    seen_cycles = set()
 
-    def dfs(start_wallet, wallet, path, visited):
+    def canonical_cycle(path):
+        """
+        Produce a canonical representation so the
+        same cycle is not counted multiple times.
+        """
 
-        if len(path) - 1 >= min_hops and wallet == start_wallet:
-            findings.append({
-                "pattern": "ROUND_TRIP",
-                "start_wallet": start_wallet,
-                "hops": len(path) - 1,
-                "path": path.copy()
-            })
+        cycle = path[:-1]
+
+        if not cycle:
+            return tuple()
+
+        rotations = []
+
+        for index in range(len(cycle)):
+            rotation = (
+                cycle[index:]
+                + cycle[:index]
+            )
+
+            rotations.append(
+                tuple(rotation)
+            )
+
+        return min(rotations)
+
+    if root_wallet:
+        root = root_wallet.lower()
+
+        start_wallets = (
+            [root]
+            if root in graph
+            else []
+        )
+    else:
+        start_wallets = list(graph.keys())
+
+    def dfs(
+        start_wallet,
+        wallet,
+        path,
+        visited
+    ):
+        if len(findings) >= max_findings:
             return
 
-        for next_wallet in graph.get(wallet, []):
+        current_hops = len(path) - 1
 
-            # Allow return to starting wallet
+        if current_hops >= max_hops:
+            return
+
+        for next_wallet in graph.get(
+            wallet,
+            set()
+        ):
             if next_wallet == start_wallet:
-                if len(path) - 1 >= min_hops:
-                    dfs(
-                        start_wallet,
-                        next_wallet,
-                        path + [next_wallet],
-                        visited
+                cycle_path = (
+                    path
+                    + [start_wallet]
+                )
+
+                hops = len(cycle_path) - 1
+
+                if hops >= min_hops:
+                    cycle_key = canonical_cycle(
+                        cycle_path
                     )
+
+                    if cycle_key not in seen_cycles:
+                        seen_cycles.add(
+                            cycle_key
+                        )
+
+                        findings.append({
+                            "pattern":
+                                "ROUND_TRIP",
+                            "start_wallet":
+                                start_wallet,
+                            "wallet":
+                                start_wallet,
+                            "hops":
+                                hops,
+                            "path":
+                                cycle_path
+                        })
+
                 continue
 
             if next_wallet in visited:
                 continue
 
             visited.add(next_wallet)
-            path.append(next_wallet)
 
-            dfs(start_wallet, next_wallet, path, visited)
+            dfs(
+                start_wallet,
+                next_wallet,
+                path + [next_wallet],
+                visited
+            )
 
-            path.pop()
             visited.remove(next_wallet)
 
-    for wallet in graph:
-        dfs(wallet, wallet, [wallet], {wallet})
+            if len(findings) >= max_findings:
+                return
+
+    for start_wallet in start_wallets:
+        dfs(
+            start_wallet,
+            start_wallet,
+            [start_wallet],
+            {start_wallet}
+        )
+
+        if len(findings) >= max_findings:
+            break
 
     return findings
